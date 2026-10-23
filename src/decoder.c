@@ -98,6 +98,10 @@ struct preview_s {
 
 struct preview_s preview = { .mutex = PTHREAD_MUTEX_INITIALIZER };
 
+// Brightness/contrast lookup table for the Y plane
+static BYTE y_lut[256];
+static volatile int y_lut_active = 0;
+
 struct jpg_dec_ctx_s  jpg_decoder;
 struct spx_decoder_s  spx_decoder;
 
@@ -533,6 +537,15 @@ static void decoder_share_frame() {
         p = jpg_decoder.m_webcamBuf;
     }
 
+    if (y_lut_active) {
+        BYTE *y = p;
+        BYTE *y_end = p + jpg_decoder.m_webcam_ySize;
+        while (y < y_end) {
+            *y = y_lut[*y];
+            y++;
+        }
+    }
+
     if (write(droidcam_device_fd, p, jpg_decoder.m_webcamYuvSize) < 0) {
         errprint("error: write() failed for video device\n");
     }
@@ -575,6 +588,21 @@ static void decoder_preview_store(BYTE *p) {
 
     if (preview.yuv && preview.notify)
         preview.notify();
+}
+
+// brightness and contrast: -100 to 100, 0 = unchanged
+void decoder_set_picture(int brightness, int contrast) {
+    BYTE lut[256];
+    double gain = (contrast + 100) / 100.0;
+    int offset = brightness * 128 / 100;
+
+    for (int i = 0; i < 256; i++) {
+        int v = (int)((i - 128) * gain + 128.5) + offset;
+        lut[i] = v < 0 ? 0 : (v > 255 ? 255 : v);
+    }
+
+    memcpy(y_lut, lut, sizeof(y_lut));
+    y_lut_active = (brightness != 0 || contrast != 0);
 }
 
 void decoder_preview_enable(int enable, void (*notify)(void)) {

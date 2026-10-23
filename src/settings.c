@@ -101,6 +101,8 @@ void LoadSettings(struct settings* settings) {
             if (1 == sscanf(buf, "vertical_flip=%d\n",&settings->vertical_flip)) continue;
             if (1 == sscanf(buf, "horizontal_flip=%d\n",&settings->horizontal_flip)) continue;
             if (1 == sscanf(buf, "rotate=%d\n",&settings->rotate)) continue;
+            if (1 == sscanf(buf, "brightness=%d\n",&settings->brightness)) continue;
+            if (1 == sscanf(buf, "contrast=%d\n",&settings->contrast)) continue;
         }
     }
 
@@ -146,6 +148,8 @@ void SaveSettings(struct settings* settings) {
         "vertical_flip=%d\n"
         "horizontal_flip=%d\n"
         "rotate=%d\n"
+        "brightness=%d\n"
+        "contrast=%d\n"
         "type=%d\n"
         ,
         version,
@@ -158,6 +162,8 @@ void SaveSettings(struct settings* settings) {
         settings->vertical_flip,
         settings->horizontal_flip,
         settings->rotate,
+        settings->brightness,
+        settings->contrast,
         settings->connection);
     fclose(fp);
 }

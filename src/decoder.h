@@ -51,6 +51,7 @@ int decoder_set_rotation(int degrees);
 int decoder_get_rotation();
 void decoder_show_test_image();
 void decoder_preview_enable(int enable, void (*notify)(void));
+void decoder_set_picture(int brightness, int contrast);
 void decoder_preview_size(int *width, int *height);
 int decoder_preview_take(BYTE *rgb, int stride, int dst_width, int dst_height);
 

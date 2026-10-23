@@ -38,6 +38,7 @@ enum control_codes {
     CB_ROTATE_LEFT,
     CB_ROTATE_180,
     CB_PREVIEW,
+    CB_PICTURE,
 };
 
 struct settings {
@@ -54,6 +55,8 @@ struct settings {
     int horizontal_flip;
     int vertical_flip;
     int rotate;
+    int brightness;
+    int contrast;
 };
 
 void LoadSettings(struct settings* settings);

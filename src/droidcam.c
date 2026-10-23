@@ -35,6 +35,9 @@ GtkWidget *sizeCombo;
 GtkWidget *previewWindow;
 GtkWidget *previewArea;
 GdkPixbuf *previewPixbuf;
+GtkWidget *pictureWindow;
+GtkWidget *brightnessScale;
+GtkWidget *contrastScale;
 GtkEntry * ipEntry;
 GtkEntry * portEntry;
 GtkButton *start_button;
@@ -526,11 +529,69 @@ static void create_preview_window(void) {
 	g_signal_connect(previewWindow, "delete-event", G_CALLBACK(preview_delete_callback), NULL);
 }
 
+// brightness/contrast window
+static void picture_callback(GtkWidget* widget, gpointer extra) {
+	g_settings.brightness = (int) gtk_range_get_value(GTK_RANGE(brightnessScale));
+	g_settings.contrast = (int) gtk_range_get_value(GTK_RANGE(contrastScale));
+	decoder_set_picture(g_settings.brightness, g_settings.contrast);
+}
+
+static void picture_reset_callback(GtkWidget* widget, gpointer extra) {
+	gtk_range_set_value(GTK_RANGE(brightnessScale), 0);
+	gtk_range_set_value(GTK_RANGE(contrastScale), 0);
+}
+
+static GtkWidget *add_picture_scale(GtkWidget *grid, int row, const char *label, int value) {
+	GtkWidget *widget = gtk_label_new(label);
+	gtk_label_set_xalign(GTK_LABEL(widget), 1.0);
+	gtk_grid_attach(GTK_GRID(grid), widget, 0, row, 1, 1);
+
+	widget = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, -100, 100, 1);
+	gtk_range_set_value(GTK_RANGE(widget), value);
+	gtk_scale_add_mark(GTK_SCALE(widget), 0, GTK_POS_BOTTOM, NULL);
+	gtk_widget_set_size_request(widget, 240, -1);
+	gtk_widget_set_hexpand(widget, TRUE);
+	gtk_grid_attach(GTK_GRID(grid), widget, 1, row, 1, 1);
+	return widget;
+}
+
+static void create_picture_window(void) {
+	GtkWidget *grid;
+	GtkWidget *widget;
+
+	pictureWindow = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+	gtk_window_set_title(GTK_WINDOW(pictureWindow), "Brightness/Contrast");
+	gtk_container_set_border_width(GTK_CONTAINER(pictureWindow), 8);
+	gtk_window_set_icon_from_file(GTK_WINDOW(pictureWindow), APP_ICON_FILE, NULL);
+
+	grid = gtk_grid_new();
+	gtk_grid_set_column_spacing(GTK_GRID(grid), 10);
+	gtk_grid_set_row_spacing(GTK_GRID(grid), 5);
+	gtk_container_add(GTK_CONTAINER(pictureWindow), grid);
+
+	brightnessScale = add_picture_scale(grid, 0, "Brightness:", g_settings.brightness);
+	contrastScale = add_picture_scale(grid, 1, "Contrast:", g_settings.contrast);
+	g_signal_connect(brightnessScale, "value-changed", G_CALLBACK(picture_callback), NULL);
+	g_signal_connect(contrastScale, "value-changed", G_CALLBACK(picture_callback), NULL);
+
+	widget = gtk_button_new_with_label("Reset");
+	g_signal_connect(widget, "clicked", G_CALLBACK(picture_reset_callback), NULL);
+	gtk_widget_set_halign(widget, GTK_ALIGN_END);
+	gtk_grid_attach(GTK_GRID(grid), widget, 1, 2, 1, 1);
+
+	g_signal_connect(pictureWindow, "delete-event", G_CALLBACK(gtk_widget_hide_on_delete), NULL);
+}
+
 static void controls_callback(GtkWidget* widget, gpointer extra) {
 	int cb = (uintptr_t) extra;
 	dbgprint("controls_callback=%d\n", cb);
 	if (cb == CB_PREVIEW) {
 		show_preview(!gtk_widget_get_visible(previewWindow));
+		return;
+	}
+	if (cb == CB_PICTURE) {
+		gtk_widget_show_all(pictureWindow);
+		gtk_window_present(GTK_WINDOW(pictureWindow));
 		return;
 	}
 	if (v_running == 0 || thread_cmd != 0) {
@@ -726,6 +787,9 @@ int main(int argc, char *argv[])
 	closure = g_cclosure_new(G_CALLBACK(accel_callback), (gpointer)(CB_PREVIEW), NULL);
 	gtk_accel_group_connect(gtk_accel, GDK_KEY_P, GDK_CONTROL_MASK, GTK_ACCEL_VISIBLE, closure);
 
+	closure = g_cclosure_new(G_CALLBACK(accel_callback), (gpointer)(CB_PICTURE), NULL);
+	gtk_accel_group_connect(gtk_accel, GDK_KEY_B, GDK_CONTROL_MASK, GTK_ACCEL_VISIBLE, closure);
+
 	gtk_window_add_accel_group(GTK_WINDOW(window), gtk_accel);
 
 	// gui
@@ -779,6 +843,11 @@ int main(int argc, char *argv[])
 	gtk_menu_shell_append (GTK_MENU_SHELL(menu), widget);
 	gtk_widget_show (widget);
 	g_signal_connect(widget, "activate", G_CALLBACK(controls_callback), (gpointer)CB_PREVIEW);
+
+	widget = gtk_menu_item_new_with_label("Brightness/Contrast (Ctrl+B)");
+	gtk_menu_shell_append (GTK_MENU_SHELL(menu), widget);
+	gtk_widget_show (widget);
+	g_signal_connect(widget, "activate", G_CALLBACK(controls_callback), (gpointer)CB_PICTURE);
 
 	// white-balance menu
 	wbMenu = gtk_menu_new();
@@ -956,6 +1025,11 @@ int main(int argc, char *argv[])
 
 		populate_size_combo();
 		create_preview_window();
+
+		if (g_settings.brightness < -100 || g_settings.brightness > 100) g_settings.brightness = 0;
+		if (g_settings.contrast < -100 || g_settings.contrast > 100) g_settings.contrast = 0;
+		decoder_set_picture(g_settings.brightness, g_settings.contrast);
+		create_picture_window();
 
 		if (decoder_set_rotation(g_settings.rotate) < 0)
 			g_settings.rotate = 0;
