@@ -31,6 +31,7 @@ GtkWidget *infoText;
 GtkWidget *batteryText;
 GtkWidget *audioCheckbox;
 GtkWidget *videoCheckbox;
+GtkWidget *sizeCombo;
 GtkEntry * ipEntry;
 GtkEntry * portEntry;
 GtkButton *start_button;
@@ -77,6 +78,13 @@ const char* wb_values[] = {
 	"daylight",
 	"cloudy-daylight",
 	"shade",
+};
+
+const char* size_options[] = {
+	"640x480",
+	"960x720",
+	"1280x720",
+	"1920x1080",
 };
 
 /* Helper Functions */
@@ -220,6 +228,7 @@ EARLY_OUT:
 	gtk_widget_set_sensitive(GTK_WIDGET(portEntry), FALSE);
 	gtk_widget_set_sensitive(GTK_WIDGET(audioCheckbox), FALSE);
 	gtk_widget_set_sensitive(GTK_WIDGET(videoCheckbox), FALSE);
+	gtk_widget_set_sensitive(GTK_WIDGET(sizeCombo), FALSE);
 	gtk_widget_set_sensitive(GTK_WIDGET(elButton), TRUE);
 	gtk_widget_set_sensitive(GTK_WIDGET(wbButton), TRUE);
 	gtk_widget_set_sensitive(GTK_WIDGET(menuButton), TRUE);
@@ -321,7 +330,56 @@ _up:
 		gtk_widget_set_sensitive(GTK_WIDGET(portEntry), portEdit);
 		gtk_widget_set_sensitive(GTK_WIDGET(audioCheckbox), audioBox);
 		gtk_widget_set_sensitive(GTK_WIDGET(videoCheckbox), videoBox);
+		gtk_widget_set_sensitive(GTK_WIDGET(sizeCombo), !decoder_video_size_fixed());
 	}
+}
+
+// video size combo callback
+static void size_callback(GtkWidget* widget, gpointer extra) {
+	unsigned width, height;
+	gchar *text = gtk_combo_box_text_get_active_text(GTK_COMBO_BOX_TEXT(sizeCombo));
+	if (!text)
+		return;
+
+	if (sscanf(text, "%ux%u", &width, &height) == 2 && v_running == 0 && a_running == 0
+		&& (width != g_settings.v4l2_width || height != g_settings.v4l2_height))
+	{
+		dbgprint("size_callback=%ux%u\n", width, height);
+		g_settings.v4l2_width = width;
+		g_settings.v4l2_height = height;
+		decoder_set_video_size(width, height);
+	}
+	g_free(text);
+}
+
+static void populate_size_combo(void) {
+	char size[32];
+	int active = -1;
+
+	if (decoder_video_size_fixed()) {
+		snprintf(size, sizeof(size), "%dx%d", decoder_get_video_width(), decoder_get_video_height());
+		gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(sizeCombo), size);
+		gtk_combo_box_set_active(GTK_COMBO_BOX(sizeCombo), 0);
+		gtk_widget_set_tooltip_text(sizeCombo, "Set by the v4l2loopback-dc module options");
+		gtk_widget_set_sensitive(sizeCombo, FALSE);
+		return;
+	}
+
+	snprintf(size, sizeof(size), "%ux%u", g_settings.v4l2_width, g_settings.v4l2_height);
+	for (size_t i = 0; i < ARRAY_LEN(size_options); i++) {
+		gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(sizeCombo), size_options[i]);
+		if (strcmp(size, size_options[i]) == 0)
+			active = i;
+	}
+
+	// custom size from settings or -size=WxH
+	if (active < 0) {
+		gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(sizeCombo), size);
+		active = ARRAY_LEN(size_options);
+	}
+
+	gtk_combo_box_set_active(GTK_COMBO_BOX(sizeCombo), active);
+	g_signal_connect(sizeCombo, "changed", G_CALLBACK(size_callback), NULL);
 }
 
 static void controls_callback(GtkWidget* widget, gpointer extra) {
@@ -653,6 +711,15 @@ int main(int argc, char *argv[])
 	portEntry = (GtkEntry*)widget;
 	gtk_grid_attach(GTK_GRID(grid), widget, 2, 1, 1, 1);
 
+	// Video size label.
+	widget = gtk_label_new("Video Size:");
+	gtk_label_set_xalign(GTK_LABEL(widget), 1.0);
+	gtk_grid_attach(GTK_GRID(grid), widget, 1, 3, 1, 1);
+
+	// Video size selection, applied on the next connect.
+	sizeCombo = gtk_combo_box_text_new();
+	gtk_grid_attach(GTK_GRID(grid), sizeCombo, 2, 3, 1, 1);
+
 	// And finally connect button.
 	widget = gtk_button_new_with_label("Connect");
 	g_signal_connect(widget, "clicked", G_CALLBACK(the_callback), (gpointer) CB_BUTTON);
@@ -690,6 +757,8 @@ int main(int argc, char *argv[])
 		gtk_label_set_text(GTK_LABEL(infoText), info);
 		printf("Video: %s\n", v4l2_device);
 		printf("Audio: %s\n", snd_device);
+
+		populate_size_combo();
 
 		// re-load flip values from last run
 		if (g_settings.horizontal_flip)
