@@ -37,6 +37,7 @@ enum control_codes {
     CB_ROTATE_RIGHT,
     CB_ROTATE_LEFT,
     CB_ROTATE_180,
+    CB_PREVIEW,
 };
 
 struct settings {

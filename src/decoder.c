@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <time.h>
 
 #if __linux__
 #include <linux/limits.h>
@@ -82,6 +83,21 @@ JPGFrame jpg_frames[JPG_BACKBUF_MAX];
 queue decode_queue;
 queue receive_queue;
 
+// Latest webcam frame for the GUI preview, only copied while enabled
+struct preview_s {
+ pthread_mutex_t mutex;
+ volatile int enabled;
+ int ready;
+ int width, height;
+ size_t size;
+ BYTE *yuv;
+ struct timespec last;
+ struct SwsContext *swc;
+ void (*notify)(void);  // called from the decode thread when a frame is ready
+};
+
+struct preview_s preview = { .mutex = PTHREAD_MUTEX_INITIALIZER };
+
 struct jpg_dec_ctx_s  jpg_decoder;
 struct spx_decoder_s  spx_decoder;
 
@@ -93,6 +109,7 @@ static int droidcam_device_fd;
 static snd_output_t *output = NULL;
 
 static void decoder_share_frame();
+static void decoder_preview_store(BYTE *p);
 extern int v4l2_fixed_size;
 
 static void check_video_size(unsigned v4l2_width, unsigned v4l2_height) {
@@ -519,6 +536,92 @@ static void decoder_share_frame() {
     if (write(droidcam_device_fd, p, jpg_decoder.m_webcamYuvSize) < 0) {
         errprint("error: write() failed for video device\n");
     }
+
+    if (preview.enabled)
+        decoder_preview_store(p);
+}
+
+#define PREVIEW_INTERVAL_MS 30
+#define PREVIEW_PADDING 64
+
+static void decoder_preview_store(BYTE *p) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    long ms = (now.tv_sec - preview.last.tv_sec) * 1000 + (now.tv_nsec - preview.last.tv_nsec) / 1000000;
+    if (ms < PREVIEW_INTERVAL_MS)
+        return;
+
+    pthread_mutex_lock(&preview.mutex);
+    if (!preview.enabled) {
+        pthread_mutex_unlock(&preview.mutex);
+        return;
+    }
+
+    size_t size = jpg_decoder.m_webcamYuvSize;
+    if (preview.size != size) {
+        free(preview.yuv);
+        // padded, swscale may read a bit past the end
+        preview.yuv = (BYTE*)malloc(size + PREVIEW_PADDING);
+        preview.size = preview.yuv ? size : 0;
+    }
+    if (preview.yuv) {
+        memcpy(preview.yuv, p, size);
+        preview.width = WEBCAM_W;
+        preview.height = WEBCAM_H;
+        preview.ready = 1;
+        preview.last = now;
+    }
+    pthread_mutex_unlock(&preview.mutex);
+
+    if (preview.yuv && preview.notify)
+        preview.notify();
+}
+
+void decoder_preview_enable(int enable, void (*notify)(void)) {
+    preview.notify = notify;
+    preview.enabled = enable;
+    if (!enable) {
+        pthread_mutex_lock(&preview.mutex);
+        FREE_OBJECT(preview.yuv, free);
+        FREE_OBJECT(preview.swc, sws_freeContext);
+        preview.size = 0;
+        preview.ready = 0;
+        pthread_mutex_unlock(&preview.mutex);
+    }
+}
+
+void decoder_preview_size(int *width, int *height) {
+    pthread_mutex_lock(&preview.mutex);
+    *width = preview.width;
+    *height = preview.height;
+    pthread_mutex_unlock(&preview.mutex);
+}
+
+// Convert the latest frame to RGB24, scaled to dst_width x dst_height.
+// Returns 1 if there was a new frame.
+int decoder_preview_take(BYTE *rgb, int stride, int dst_width, int dst_height) {
+    int rc = 0;
+    pthread_mutex_lock(&preview.mutex);
+    int width = preview.width, height = preview.height;
+    if (preview.ready && preview.yuv) {
+        preview.swc = sws_getCachedContext(preview.swc,
+            width, height, AV_PIX_FMT_YUV420P,
+            dst_width, dst_height, AV_PIX_FMT_RGB24,
+            SWS_FAST_BILINEAR, NULL, NULL, NULL);
+
+        if (preview.swc) {
+            const uint8_t *src[4] = { preview.yuv, preview.yuv + width * height,
+                preview.yuv + width * height * 5 / 4, NULL };
+            int src_stride[4] = { width, width / 2, width / 2, 0 };
+            uint8_t *dst[4] = { rgb, NULL, NULL, NULL };
+            int dst_stride[4] = { stride, 0, 0, 0 };
+            sws_scale(preview.swc, src, src_stride, 0, height, dst, dst_stride);
+            rc = 1;
+        }
+        preview.ready = 0;
+    }
+    pthread_mutex_unlock(&preview.mutex);
+    return rc;
 }
 
 

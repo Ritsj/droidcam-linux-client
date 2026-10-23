@@ -32,6 +32,9 @@ GtkWidget *batteryText;
 GtkWidget *audioCheckbox;
 GtkWidget *videoCheckbox;
 GtkWidget *sizeCombo;
+GtkWidget *previewWindow;
+GtkWidget *previewArea;
+GdkPixbuf *previewPixbuf;
 GtkEntry * ipEntry;
 GtkEntry * portEntry;
 GtkButton *start_button;
@@ -425,9 +428,111 @@ static void populate_size_combo(void) {
 	g_signal_connect(sizeCombo, "changed", G_CALLBACK(size_callback), NULL);
 }
 
+// preview window
+volatile gint previewPending = 0;
+
+// Converts the latest frame straight to the size it is drawn at
+static gboolean preview_frame_idle(gpointer data) {
+	int width, height;
+	g_atomic_int_set(&previewPending, 0);
+	if (!gtk_widget_get_visible(previewWindow))
+		return G_SOURCE_REMOVE;
+
+	decoder_preview_size(&width, &height);
+	int area_w = gtk_widget_get_allocated_width(previewArea);
+	int area_h = gtk_widget_get_allocated_height(previewArea);
+	if (width <= 0 || height <= 0 || area_w < 2 || area_h < 2)
+		return G_SOURCE_REMOVE;
+
+	// fit into the window, keep the aspect ratio
+	double scale = MIN((double) area_w / width, (double) area_h / height);
+	int dst_w = MAX(2, (int)(width * scale) & ~1);
+	int dst_h = MAX(2, (int)(height * scale) & ~1);
+
+	if (!previewPixbuf || gdk_pixbuf_get_width(previewPixbuf) != dst_w
+		|| gdk_pixbuf_get_height(previewPixbuf) != dst_h)
+	{
+		if (previewPixbuf)
+			g_object_unref(previewPixbuf);
+
+		// own buffer with aligned rows and padding, swscale may write a bit past the end
+		int stride = (dst_w * 3 + 63) & ~63;
+		guchar *pixels = g_malloc0((gsize) stride * dst_h + 64);
+		previewPixbuf = gdk_pixbuf_new_from_data(pixels, GDK_COLORSPACE_RGB, FALSE, 8,
+			dst_w, dst_h, stride, (GdkPixbufDestroyNotify) g_free, NULL);
+	}
+
+	if (decoder_preview_take(gdk_pixbuf_get_pixels(previewPixbuf),
+		gdk_pixbuf_get_rowstride(previewPixbuf), dst_w, dst_h))
+	{
+		gtk_widget_queue_draw(previewArea);
+	}
+	return G_SOURCE_REMOVE;
+}
+
+// called from the decode thread
+static void preview_notify(void) {
+	if (g_atomic_int_compare_and_exchange(&previewPending, 0, 1))
+		gdk_threads_add_idle(preview_frame_idle, NULL);
+}
+
+static gboolean preview_draw_callback(GtkWidget *widget, cairo_t *cr, gpointer data) {
+	int area_w = gtk_widget_get_allocated_width(widget);
+	int area_h = gtk_widget_get_allocated_height(widget);
+
+	cairo_set_source_rgb(cr, 0, 0, 0);
+	cairo_paint(cr);
+	if (!previewPixbuf)
+		return FALSE;
+
+	// already scaled, just center it
+	int w = gdk_pixbuf_get_width(previewPixbuf);
+	int h = gdk_pixbuf_get_height(previewPixbuf);
+	gdk_cairo_set_source_pixbuf(cr, previewPixbuf, (area_w - w) / 2, (area_h - h) / 2);
+	cairo_paint(cr);
+	return FALSE;
+}
+
+static void show_preview(gboolean show) {
+	if (show) {
+		gtk_widget_show_all(previewWindow);
+		gtk_window_present(GTK_WINDOW(previewWindow));
+		decoder_preview_enable(1, preview_notify);
+		return;
+	}
+
+	decoder_preview_enable(0, NULL);
+	if (previewPixbuf) {
+		g_object_unref(previewPixbuf);
+		previewPixbuf = NULL;
+	}
+	gtk_widget_hide(previewWindow);
+}
+
+static gboolean preview_delete_callback(GtkWidget *widget, GdkEvent *event, gpointer extra) {
+	show_preview(FALSE);
+	return TRUE; // only hide, the stream keeps running
+}
+
+static void create_preview_window(void) {
+	previewWindow = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+	gtk_window_set_title(GTK_WINDOW(previewWindow), "DroidCam Preview");
+	gtk_window_set_default_size(GTK_WINDOW(previewWindow), 640, 360);
+	gtk_window_set_icon_from_file(GTK_WINDOW(previewWindow), APP_ICON_FILE, NULL);
+
+	previewArea = gtk_drawing_area_new();
+	gtk_container_add(GTK_CONTAINER(previewWindow), previewArea);
+	g_signal_connect(previewArea, "draw", G_CALLBACK(preview_draw_callback), NULL);
+	g_signal_connect(previewWindow, "delete-event", G_CALLBACK(preview_delete_callback), NULL);
+}
+
 static void controls_callback(GtkWidget* widget, gpointer extra) {
 	int cb = (uintptr_t) extra;
 	dbgprint("controls_callback=%d\n", cb);
+	if (cb == CB_PREVIEW) {
+		show_preview(!gtk_widget_get_visible(previewWindow));
+		return;
+	}
 	if (v_running == 0 || thread_cmd != 0) {
 		return;
 	}
@@ -618,6 +723,9 @@ int main(int argc, char *argv[])
 	closure = g_cclosure_new(G_CALLBACK(accel_callback), (gpointer)(CB_ROTATE_180), NULL);
 	gtk_accel_group_connect(gtk_accel, GDK_KEY_U, GDK_CONTROL_MASK, GTK_ACCEL_VISIBLE, closure);
 
+	closure = g_cclosure_new(G_CALLBACK(accel_callback), (gpointer)(CB_PREVIEW), NULL);
+	gtk_accel_group_connect(gtk_accel, GDK_KEY_P, GDK_CONTROL_MASK, GTK_ACCEL_VISIBLE, closure);
+
 	gtk_window_add_accel_group(GTK_WINDOW(window), gtk_accel);
 
 	// gui
@@ -666,6 +774,11 @@ int main(int argc, char *argv[])
 	gtk_menu_shell_append (GTK_MENU_SHELL(menu), widget);
 	gtk_widget_show (widget);
 	g_signal_connect(widget, "activate", G_CALLBACK(controls_callback), (gpointer)CB_ROTATE_180);
+
+	widget = gtk_menu_item_new_with_label("Show/Hide Preview (Ctrl+P)");
+	gtk_menu_shell_append (GTK_MENU_SHELL(menu), widget);
+	gtk_widget_show (widget);
+	g_signal_connect(widget, "activate", G_CALLBACK(controls_callback), (gpointer)CB_PREVIEW);
 
 	// white-balance menu
 	wbMenu = gtk_menu_new();
@@ -842,6 +955,7 @@ int main(int argc, char *argv[])
 		printf("Audio: %s\n", snd_device);
 
 		populate_size_combo();
+		create_preview_window();
 
 		if (decoder_set_rotation(g_settings.rotate) < 0)
 			g_settings.rotate = 0;
@@ -865,6 +979,7 @@ int main(int argc, char *argv[])
 
 		// main loop
 		gtk_main();
+		show_preview(FALSE);
 		Stop();
 		decoder_fini();
 		connection_cleanup();
