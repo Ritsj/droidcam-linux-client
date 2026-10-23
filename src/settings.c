@@ -100,6 +100,7 @@ void LoadSettings(struct settings* settings) {
             if (1 == sscanf(buf, "confirm_close=%d\n",&settings->confirm_close)) continue;
             if (1 == sscanf(buf, "vertical_flip=%d\n",&settings->vertical_flip)) continue;
             if (1 == sscanf(buf, "horizontal_flip=%d\n",&settings->horizontal_flip)) continue;
+            if (1 == sscanf(buf, "rotate=%d\n",&settings->rotate)) continue;
         }
     }
 
@@ -144,6 +145,7 @@ void SaveSettings(struct settings* settings) {
         "confirm_close=%d\n"
         "vertical_flip=%d\n"
         "horizontal_flip=%d\n"
+        "rotate=%d\n"
         "type=%d\n"
         ,
         version,
@@ -155,6 +157,7 @@ void SaveSettings(struct settings* settings) {
         settings->confirm_close,
         settings->vertical_flip,
         settings->horizontal_flip,
+        settings->rotate,
         settings->connection);
     fclose(fp);
 }

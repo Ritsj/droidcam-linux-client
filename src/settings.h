@@ -34,6 +34,9 @@ enum control_codes {
     CB_CONTROL_LED,
     CB_H_FLIP,
     CB_V_FLIP,
+    CB_ROTATE_RIGHT,
+    CB_ROTATE_LEFT,
+    CB_ROTATE_180,
 };
 
 struct settings {
@@ -49,6 +52,7 @@ struct settings {
     int confirm_close;
     int horizontal_flip;
     int vertical_flip;
+    int rotate;
 };
 
 void LoadSettings(struct settings* settings);

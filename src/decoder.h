@@ -47,6 +47,8 @@ int decoder_set_video_size(unsigned v4l2_width, unsigned v4l2_height);
 int decoder_video_size_fixed();
 int decoder_horizontal_flip();
 int decoder_vertical_flip();
+int decoder_set_rotation(int degrees);
+int decoder_get_rotation();
 void decoder_show_test_image();
 
 /* 20ms 16hkz 16 bit */

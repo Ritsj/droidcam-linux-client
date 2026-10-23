@@ -334,6 +334,49 @@ _up:
 	}
 }
 
+// webcam size from the settings, swapped when rotated by 90 degrees
+static int apply_video_size(void) {
+	if (g_settings.rotate % 180)
+		return decoder_set_video_size(g_settings.v4l2_height, g_settings.v4l2_width);
+
+	return decoder_set_video_size(g_settings.v4l2_width, g_settings.v4l2_height);
+}
+
+// the phone app needs a moment before it accepts a new connection
+#define RECONNECT_DELAY_MS 1000
+
+static gboolean reconnect_callback(gpointer data) {
+	gtk_widget_set_sensitive(GTK_WIDGET(start_button), TRUE);
+	if (v_running == 0 && a_running == 0)
+		the_callback(NULL, (gpointer) CB_BUTTON);
+	return G_SOURCE_REMOVE;
+}
+
+static void rotate_video(int degrees) {
+	int prev = g_settings.rotate;
+	int rotation = (prev + degrees) % 360;
+	int rc = decoder_set_rotation(rotation);
+	if (rc < 0) {
+		MSG_ERROR("Rotating by 90 degrees is not supported with v4l2loopback-dc.\n"
+			"Swap width and height in its module options instead.");
+		return;
+	}
+
+	g_settings.rotate = rotation;
+	if (rc == 1) {
+		// webcam width and height are swapped, reconnect with the new size
+		the_callback(NULL, (gpointer) CB_BUTTON);
+		if (!apply_video_size()) {
+			decoder_set_rotation(prev);
+			g_settings.rotate = prev;
+			apply_video_size();
+		}
+		gtk_button_set_label(start_button, "Please wait");
+		gtk_widget_set_sensitive(GTK_WIDGET(start_button), FALSE);
+		g_timeout_add(RECONNECT_DELAY_MS, reconnect_callback, NULL);
+	}
+}
+
 // video size combo callback
 static void size_callback(GtkWidget* widget, gpointer extra) {
 	unsigned width, height;
@@ -347,7 +390,7 @@ static void size_callback(GtkWidget* widget, gpointer extra) {
 		dbgprint("size_callback=%ux%u\n", width, height);
 		g_settings.v4l2_width = width;
 		g_settings.v4l2_height = height;
-		decoder_set_video_size(width, height);
+		apply_video_size();
 	}
 	g_free(text);
 }
@@ -400,6 +443,15 @@ static void controls_callback(GtkWidget* widget, gpointer extra) {
 		break;
 		case CB_V_FLIP:
 			g_settings.vertical_flip = decoder_vertical_flip();
+		break;
+		case CB_ROTATE_RIGHT:
+			rotate_video(90);
+		break;
+		case CB_ROTATE_LEFT:
+			rotate_video(270);
+		break;
+		case CB_ROTATE_180:
+			rotate_video(180);
 		break;
 	}
 }
@@ -557,6 +609,15 @@ int main(int argc, char *argv[])
 	closure = g_cclosure_new(G_CALLBACK(accel_callback), (gpointer)(CB_V_FLIP), NULL);
 	gtk_accel_group_connect(gtk_accel, GDK_KEY_V, GDK_CONTROL_MASK, GTK_ACCEL_VISIBLE, closure);
 
+	closure = g_cclosure_new(G_CALLBACK(accel_callback), (gpointer)(CB_ROTATE_RIGHT), NULL);
+	gtk_accel_group_connect(gtk_accel, GDK_KEY_R, GDK_CONTROL_MASK, GTK_ACCEL_VISIBLE, closure);
+
+	closure = g_cclosure_new(G_CALLBACK(accel_callback), (gpointer)(CB_ROTATE_LEFT), NULL);
+	gtk_accel_group_connect(gtk_accel, GDK_KEY_R, GDK_CONTROL_MASK | GDK_SHIFT_MASK, GTK_ACCEL_VISIBLE, closure);
+
+	closure = g_cclosure_new(G_CALLBACK(accel_callback), (gpointer)(CB_ROTATE_180), NULL);
+	gtk_accel_group_connect(gtk_accel, GDK_KEY_U, GDK_CONTROL_MASK, GTK_ACCEL_VISIBLE, closure);
+
 	gtk_window_add_accel_group(GTK_WINDOW(window), gtk_accel);
 
 	// gui
@@ -590,6 +651,21 @@ int main(int argc, char *argv[])
 	gtk_menu_shell_append (GTK_MENU_SHELL(menu), widget);
 	gtk_widget_show (widget);
 	g_signal_connect(widget, "activate", G_CALLBACK(controls_callback), (gpointer)CB_V_FLIP);
+
+	widget = gtk_menu_item_new_with_label("Rotate 90\u00b0 Right (Ctrl+R)");
+	gtk_menu_shell_append (GTK_MENU_SHELL(menu), widget);
+	gtk_widget_show (widget);
+	g_signal_connect(widget, "activate", G_CALLBACK(controls_callback), (gpointer)CB_ROTATE_RIGHT);
+
+	widget = gtk_menu_item_new_with_label("Rotate 90\u00b0 Left (Ctrl+Shift+R)");
+	gtk_menu_shell_append (GTK_MENU_SHELL(menu), widget);
+	gtk_widget_show (widget);
+	g_signal_connect(widget, "activate", G_CALLBACK(controls_callback), (gpointer)CB_ROTATE_LEFT);
+
+	widget = gtk_menu_item_new_with_label("Rotate 180\u00b0 (Ctrl+U)");
+	gtk_menu_shell_append (GTK_MENU_SHELL(menu), widget);
+	gtk_widget_show (widget);
+	g_signal_connect(widget, "activate", G_CALLBACK(controls_callback), (gpointer)CB_ROTATE_180);
 
 	// white-balance menu
 	wbMenu = gtk_menu_new();
@@ -749,7 +825,14 @@ int main(int argc, char *argv[])
 	if (g_settings.video)
 		gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(videoCheckbox), TRUE);
 
-	if (decoder_init(v4l2_dev, g_settings.v4l2_width, g_settings.v4l2_height))
+	g_settings.rotate = ((g_settings.rotate % 360) + 360) % 360 / 90 * 90;
+	unsigned width = g_settings.v4l2_width, height = g_settings.v4l2_height;
+	if (g_settings.rotate % 180) {
+		width = g_settings.v4l2_height;
+		height = g_settings.v4l2_width;
+	}
+
+	if (decoder_init(v4l2_dev, width, height))
 	{
 		// add info about devices
 		snprintf(info, sizeof(info), "Client v" APP_VER_STR ", Video: %s, Audio: %s",
@@ -759,6 +842,9 @@ int main(int argc, char *argv[])
 		printf("Audio: %s\n", snd_device);
 
 		populate_size_combo();
+
+		if (decoder_set_rotation(g_settings.rotate) < 0)
+			g_settings.rotate = 0;
 
 		// re-load flip values from last run
 		if (g_settings.horizontal_flip)

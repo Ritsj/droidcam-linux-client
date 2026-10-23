@@ -77,6 +77,7 @@ static inline void usage(__attribute__((__unused__)) int argc, char *argv[]) {
     "\n"
     " -vflip      Apply vertical flip\n"
     " -hflip      Apply horizontal flip\n"
+    " -rotate=N   Rotate clockwise by 90, 180 or 270 degrees\n"
     "\n"
     " -nocontrols Disable controls and avoid reading from stdin.\n"
     "             Otherwise, enter '?' for list of commands while streaming.\n"
@@ -105,6 +106,12 @@ static void parse_args(int argc, char *argv[]) {
             }
             if (argv[i][0] == '-' && argv[i][1] == 'h' && argv[i][2] == 'f' && argv[i][3] == 'l' && argv[i][5] == 'p') {
                 g_settings.horizontal_flip = 1;
+                continue;
+            }
+
+            if (argv[i][0] == '-' && argv[i][1] == 'r' && argv[i][2] == 'o') {
+                if (sscanf(argv[i], "-rotate=%d", &g_settings.rotate) != 1 || g_settings.rotate % 90)
+                    goto ERROR;
                 continue;
             }
 
@@ -237,7 +244,18 @@ int main(int argc, char *argv[]) {
     if (!v_running && !a_running)
         v_running = 1;
 
+    if (g_settings.rotate % 180) {
+        unsigned w = v4l2_width;
+        v4l2_width = v4l2_height;
+        v4l2_height = w;
+    }
+
     if (!decoder_init(v4l2_dev, v4l2_width, v4l2_height)) {
+        return 2;
+    }
+
+    if (decoder_set_rotation(g_settings.rotate) < 0) {
+        errprint("Rotating by 90 degrees is not supported with v4l2loopback-dc\n");
         return 2;
     }
 

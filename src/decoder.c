@@ -48,6 +48,8 @@ struct spx_decoder_s {
 
 struct jpg_dec_ctx_s {
  int invert;
+ int rotation;          // clockwise, set by the user
+ int h_flip, v_flip;
  int subsamp;
  int m_width, m_height; // stream WxH
  int d_width, d_height; // decoded WxH (can be inverted)
@@ -107,7 +109,6 @@ static void check_video_size(unsigned v4l2_width, unsigned v4l2_height) {
 }
 
 static void set_webcam_size_fields(void) {
-    jpg_decoder.invert = (WEBCAM_W < WEBCAM_H);
     jpg_decoder.m_webcamYuvSize  = WEBCAM_W * WEBCAM_H * 3 / 2;
     jpg_decoder.m_webcam_ySize   = WEBCAM_W * WEBCAM_H;
     jpg_decoder.m_webcam_uvSize  = jpg_decoder.m_webcam_ySize / 4;
@@ -219,6 +220,58 @@ int decoder_set_video_size(unsigned v4l2_width, unsigned v4l2_height) {
     return WEBCAM_W == v4l2_width && WEBCAM_H == v4l2_height;
 }
 
+// Total clockwise rotation of the stream, including the 90 degrees
+// needed for a portrait webcam size that was not swapped by rotation.
+static int get_total_rotation(void) {
+    int portrait = (WEBCAM_W < WEBCAM_H);
+    int swapped = (jpg_decoder.rotation % 180) != 0;
+    return (jpg_decoder.rotation + (portrait != swapped ? 90 : 0)) % 360;
+}
+
+// Rotation and flips combined into a single transform
+static int get_transform_op(int rotation) {
+    int h_flip = jpg_decoder.h_flip;
+    if (jpg_decoder.v_flip) {
+        // vertical flip == horizontal flip + 180
+        h_flip = !h_flip;
+        rotation = (rotation + 180) % 360;
+    }
+
+    switch (rotation) {
+        case 90:  return h_flip ? TJXOP_TRANSPOSE  : TJXOP_ROT90;
+        case 180: return h_flip ? TJXOP_VFLIP      : TJXOP_ROT180;
+        case 270: return h_flip ? TJXOP_TRANSVERSE : TJXOP_ROT270;
+    }
+    return h_flip ? TJXOP_HFLIP : TJXOP_NONE;
+}
+
+// Apply to the running stream, unless the decoded size would change
+static void update_transform(void) {
+    int rotation = get_total_rotation();
+    if (((rotation % 180) != 0) == jpg_decoder.invert)
+        jpg_decoder.transform.op = get_transform_op(rotation);
+}
+
+// Returns 1 if the webcam width and height need to be swapped
+// (the stream must be restarted), -1 if not supported.
+int decoder_set_rotation(int degrees) {
+    degrees = ((degrees % 360) + 360) % 360;
+    if (degrees % 90)
+        degrees = 0;
+
+    int swap = ((degrees % 180) != (jpg_decoder.rotation % 180));
+    if (swap && v4l2_fixed_size)
+        return -1;
+
+    jpg_decoder.rotation = degrees;
+    update_transform();
+    return swap;
+}
+
+int decoder_get_rotation() {
+    return jpg_decoder.rotation;
+}
+
 int decoder_video_size_fixed() {
     return v4l2_fixed_size;
 }
@@ -272,11 +325,12 @@ int decoder_prepare_video(char * header) {
         return 0;
     }
 
+    int rotation = get_total_rotation();
+    jpg_decoder.invert = (rotation % 180) != 0;
+    jpg_decoder.transform.op = get_transform_op(rotation);
     if (jpg_decoder.invert) {
         jpg_decoder.d_width = jpg_decoder.m_height;
         jpg_decoder.d_height = jpg_decoder.m_width;
-        jpg_decoder.transform.op = TJXOP_ROT90;
-
     } else {
         jpg_decoder.d_width = jpg_decoder.m_width;
         jpg_decoder.d_height = jpg_decoder.m_height;
@@ -365,6 +419,25 @@ void decoder_cleanup() {
     queue_clear(&decode_queue);
 }
 
+// Repeat the last decoded column and row into the part trimmed by the transform
+static void fill_trimmed_edges(int width, int height) {
+    for (int plane = 0; plane < 3; plane++) {
+        int shift = plane ? 1 : 0;
+        int w = width >> shift, h = height >> shift;
+        int dw = jpg_decoder.d_width >> shift, dh = jpg_decoder.d_height >> shift;
+        int stride = jpg_decoder.tjDstStride[plane];
+        BYTE *buf = jpg_decoder.tjDstSlice[plane];
+        if (w <= 0 || h <= 0)
+            continue;
+
+        for (int y = 0; y < h && w < dw; y++)
+            memset(buf + y * stride + w, buf[y * stride + w - 1], dw - w);
+
+        for (int y = h; y < dh; y++)
+            memcpy(buf + y * stride, buf + (h - 1) * stride, dw);
+    }
+}
+
 void process_frame(JPGFrame *frame) {
     unsigned long len = (unsigned long)frame->length;
     BYTE *p = frame->data;
@@ -392,6 +465,7 @@ void process_frame(JPGFrame *frame) {
         jpg_decoder.subsamp = subsamp;
     }
 
+    int width = jpg_decoder.d_width, height = jpg_decoder.d_height;
     if (jpg_decoder.transform.op) {
         // Transform into a separate preallocated buffer: transforming in place
         // into the (non tjAlloc'd) input buffer lets libturbojpeg free() it.
@@ -403,6 +477,13 @@ void process_frame(JPGFrame *frame) {
         }
         p = jpg_decoder.m_xformBuf;
         len = xlen;
+
+        // the transform trims partial 16x16 blocks it would move to the top or left edge
+        int subsamp, colorspace;
+        if (tjDecompressHeader3(jpg_decoder.tj, p, len, &width, &height, &subsamp, &colorspace) < 0) {
+            errprint("tjDecompressHeader3() failure: %s\n", tjGetErrorStr2(jpg_decoder.tj));
+            return;
+        }
     }
 
     if (tjDecompressToYUVPlanes(jpg_decoder.tj, p, len,
@@ -413,6 +494,9 @@ void process_frame(JPGFrame *frame) {
         errprint("tjDecompressToYUV2 failure: %d\n", tjGetErrorCode(jpg_decoder.tj));
         return;
     }
+
+    if (width < jpg_decoder.d_width || height < jpg_decoder.d_height)
+        fill_trimmed_edges(width, height);
 
     decoder_share_frame();
     return;
@@ -499,31 +583,15 @@ int decoder_get_video_height() {
 }
 
 int decoder_horizontal_flip() {
-    int h_flip  = (jpg_decoder.transform.op == TJXOP_HFLIP);
-    int v_flip  = (jpg_decoder.transform.op == TJXOP_VFLIP);
-    int hv_flip = (jpg_decoder.transform.op == TJXOP_ROT180);
-
-    if (h_flip || hv_flip) {
-        jpg_decoder.transform.op = hv_flip ? TJXOP_VFLIP : TJXOP_NONE;
-    } else {
-        jpg_decoder.transform.op = v_flip ? TJXOP_ROT180 : TJXOP_HFLIP;
-    }
-
-    return jpg_decoder.transform.op == TJXOP_HFLIP || jpg_decoder.transform.op == TJXOP_ROT180;
+    jpg_decoder.h_flip = !jpg_decoder.h_flip;
+    update_transform();
+    return jpg_decoder.h_flip;
 }
 
 int decoder_vertical_flip() {
-    int h_flip  = (jpg_decoder.transform.op == TJXOP_HFLIP);
-    int v_flip  = (jpg_decoder.transform.op == TJXOP_VFLIP);
-    int hv_flip = (jpg_decoder.transform.op == TJXOP_ROT180);
-
-    if (v_flip || hv_flip) {
-        jpg_decoder.transform.op = hv_flip ? TJXOP_HFLIP : TJXOP_NONE;
-    } else {
-        jpg_decoder.transform.op = h_flip ? TJXOP_ROT180 : TJXOP_VFLIP;
-    }
-
-    return jpg_decoder.transform.op == TJXOP_VFLIP || jpg_decoder.transform.op == TJXOP_ROT180;
+    jpg_decoder.v_flip = !jpg_decoder.v_flip;
+    update_transform();
+    return jpg_decoder.v_flip;
 }
 
 int decoder_get_audio_frame_size(void) {
