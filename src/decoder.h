@@ -43,6 +43,8 @@ void push_jpg_frame(JPGFrame*, bool empty);
 void process_frame(JPGFrame*);
 int decoder_get_video_width();
 int decoder_get_video_height();
+int decoder_set_video_size(unsigned v4l2_width, unsigned v4l2_height);
+int decoder_video_size_fixed();
 int decoder_horizontal_flip();
 int decoder_vertical_flip();
 void decoder_show_test_image();
@@ -70,6 +72,7 @@ void set_v4l2_device(const char* device);
 int open_v4l2_device(void);
 int find_v4l2_device(const char* bus_info);
 void query_v4l_device(int droidcam_device_fd, unsigned *WEBCAM_W, unsigned *WEBCAM_H);
+int v4l2_size_available(int fd, unsigned width, unsigned height);
 
 snd_pcm_t *find_snd_device(void);
 int snd_transfer_check(snd_pcm_t *handle, struct snd_transfer_s *transfer);

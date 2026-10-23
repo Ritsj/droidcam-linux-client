@@ -14,6 +14,7 @@
 #include "decoder.h"
 
 char v4l2_device[32];
+int v4l2_fixed_size = 0;
 
 static int xioctl(int fd, int request, void *arg){
     int r;
@@ -133,6 +134,22 @@ void set_v4l2_device(const char* device) {
     v4l2_device[sizeof(v4l2_device) - 1] = '\0';
 }
 
+// Check if the size can be set, without giving up the writer side.
+// While another app holds the format, only its size is listed.
+int v4l2_size_available(int fd, unsigned width, unsigned height) {
+    struct v4l2_frmsizeenum frmsize = {0};
+    frmsize.pixel_format = V4L2_PIX_FMT_YUV420;
+
+    set_control_i(fd, "keep_format", 0);
+    int ret = xioctl(fd, VIDIOC_ENUM_FRAMESIZES, &frmsize);
+    set_control_i(fd, "keep_format", 1);
+
+    if (ret < 0 || frmsize.type != V4L2_FRMSIZE_TYPE_DISCRETE)
+        return 1;
+
+    return frmsize.discrete.width == width && frmsize.discrete.height == height;
+}
+
 void query_v4l_device(int fd, unsigned *WEBCAM_W, unsigned *WEBCAM_H) {
     struct v4l2_capability v4l2cap = {0};
     struct v4l2_format vid_format = {0};
@@ -152,17 +169,23 @@ void query_v4l_device(int fd, unsigned *WEBCAM_W, unsigned *WEBCAM_H) {
     dbgprint("using '%s' (%s)\n", v4l2cap.card, v4l2cap.bus_info);
 
     const char* bus_info_dc = V4L2_PLATFORM_DC;
-    if (0 != strncmp(bus_info_dc, (const char*) v4l2cap.bus_info, strlen(bus_info_dc))) {
+    v4l2_fixed_size = (0 == strncmp(bus_info_dc, (const char*) v4l2cap.bus_info, strlen(bus_info_dc)));
+    if (!v4l2_fixed_size) {
         vid_format.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
         xioctl(fd, VIDIOC_G_FMT, &vid_format);
+
+        // keep_format from a previous run locks the size, unlock it first
+        set_control_i(fd, "keep_format", 0);
 
         dbgprint("set fmt YU12:%dx%d\n", in_width, in_height);
         vid_format.fmt.pix.width = in_width;
         vid_format.fmt.pix.height = in_height;
         vid_format.fmt.pix.pixelformat = V4L2_PIX_FMT_YUV420;
         vid_format.fmt.pix.field = V4L2_FIELD_NONE;
-        if (xioctl(fd, VIDIOC_S_FMT, &vid_format) >= 0) {
-            set_control_i(fd, "keep_format", 1);
+        int set_ok = (xioctl(fd, VIDIOC_S_FMT, &vid_format) >= 0);
+        set_control_i(fd, "keep_format", 1);
+        if (set_ok && vid_format.fmt.pix.width == (unsigned) in_width
+                   && vid_format.fmt.pix.height == (unsigned) in_height) {
             goto early_out;
         }
 
@@ -170,6 +193,11 @@ void query_v4l_device(int fd, unsigned *WEBCAM_W, unsigned *WEBCAM_H) {
     }
 
     int ret = xioctl(fd, VIDIOC_G_FMT, &vid_format);
+    if (ret < 0 && vid_format.type == V4L2_BUF_TYPE_VIDEO_OUTPUT) {
+        // another app holds the format, query it as a reader
+        vid_format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        ret = xioctl(fd, VIDIOC_G_FMT, &vid_format);
+    }
     if (ret < 0) {
         errprint("Error: Unable to determine video device fmt. dev=%s errno=%d\n",
             v4l2_device, errno);

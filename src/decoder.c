@@ -91,6 +91,27 @@ static int droidcam_device_fd;
 static snd_output_t *output = NULL;
 
 static void decoder_share_frame();
+extern int v4l2_fixed_size;
+
+static void check_video_size(unsigned v4l2_width, unsigned v4l2_height) {
+    char msg[256];
+    if (v4l2_fixed_size || (WEBCAM_W == v4l2_width && WEBCAM_H == v4l2_height))
+        return;
+
+    snprintf(msg, sizeof(msg),
+        "Video device refused %ux%u, using %ux%u.\n"
+        "Close other apps using the webcam and try again, or close DroidCam and run:\n"
+        "sudo modprobe -r v4l2loopback && sudo modprobe v4l2loopback exclusive_caps=1",
+        v4l2_width, v4l2_height, WEBCAM_W, WEBCAM_H);
+    MSG_ERROR(msg);
+}
+
+static void set_webcam_size_fields(void) {
+    jpg_decoder.invert = (WEBCAM_W < WEBCAM_H);
+    jpg_decoder.m_webcamYuvSize  = WEBCAM_W * WEBCAM_H * 3 / 2;
+    jpg_decoder.m_webcam_ySize   = WEBCAM_W * WEBCAM_H;
+    jpg_decoder.m_webcam_uvSize  = jpg_decoder.m_webcam_ySize / 4;
+}
 
 #define FREE_OBJECT(obj, free_func) if(obj){dbgprint(" " #obj " %p\n", obj); free_func(obj); obj=NULL;}
 
@@ -124,18 +145,16 @@ int decoder_init(const char* v4l2_device, unsigned v4l2_width, unsigned v4l2_hei
             MSG_ERROR("Unable to query v4l2 device for correct parameters");
             return 0;
         }
+        check_video_size(v4l2_width, v4l2_height);
     }
 
     memset(&jpg_decoder, 0, sizeof(struct jpg_dec_ctx_s));
     jpg_decoder.tj = NULL;
     jpg_decoder.tjXform = NULL;
-    jpg_decoder.invert = (WEBCAM_W < WEBCAM_H);
     jpg_decoder.transform.op = 0;
     jpg_decoder.transform.options = TJXOPT_COPYNONE | TJXOPT_TRIM;
     jpg_decoder.m_BufferLimit = 0;
-    jpg_decoder.m_webcamYuvSize  = WEBCAM_W * WEBCAM_H * 3 / 2;
-    jpg_decoder.m_webcam_ySize   = WEBCAM_W * WEBCAM_H;
-    jpg_decoder.m_webcam_uvSize  = jpg_decoder.m_webcam_ySize / 4;
+    set_webcam_size_fields();
 
     if (snd_output_stdio_attach(&output, stdout, 0) < 0) {
         errprint("snd_output_stdio_attach failed\n");
@@ -159,6 +178,49 @@ int decoder_init(const char* v4l2_device, unsigned v4l2_width, unsigned v4l2_hei
     queue_init(&receive_queue);
     dbgprint("decoder_init done\n");
     return 1;
+}
+
+// Must not be called while video is running
+int decoder_set_video_size(unsigned v4l2_width, unsigned v4l2_height) {
+    unsigned prev_w = WEBCAM_W, prev_h = WEBCAM_H;
+    if (droidcam_device_fd <= 0 || v4l2_fixed_size)
+        return 0;
+
+    if (WEBCAM_W == v4l2_width && WEBCAM_H == v4l2_height)
+        return 1;
+
+    // re-opening gives up the writer side, keep it if another app holds the format
+    if (!v4l2_size_available(droidcam_device_fd, v4l2_width, v4l2_height)) {
+        check_video_size(v4l2_width, v4l2_height);
+        return 0;
+    }
+
+    // after streaming, the format can only be changed by a new opener
+    close(droidcam_device_fd);
+    droidcam_device_fd = open_v4l2_device();
+    if (droidcam_device_fd <= 0) {
+        MSG_ERROR("Unable to re-open the video device");
+        droidcam_device_fd = 0;
+        return 0;
+    }
+
+    WEBCAM_W = v4l2_width;
+    WEBCAM_H = v4l2_height;
+    query_v4l_device(droidcam_device_fd, &WEBCAM_W, &WEBCAM_H);
+    if (WEBCAM_W < 2 || WEBCAM_H < 2 || WEBCAM_W > 9999 || WEBCAM_H > 9999) {
+        MSG_ERROR("Unable to query v4l2 device for correct parameters");
+        WEBCAM_W = prev_w;
+        WEBCAM_H = prev_h;
+        return 0;
+    }
+
+    set_webcam_size_fields();
+    check_video_size(v4l2_width, v4l2_height);
+    return WEBCAM_W == v4l2_width && WEBCAM_H == v4l2_height;
+}
+
+int decoder_video_size_fixed() {
+    return v4l2_fixed_size;
 }
 
 void decoder_fini() {
