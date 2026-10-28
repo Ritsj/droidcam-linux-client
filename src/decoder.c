@@ -57,12 +57,12 @@ struct jpg_dec_ctx_s {
  int m_Yuv420Size, m_ySize, m_uvSize;
  int m_webcamYuvSize, m_webcam_ySize, m_webcam_uvSize;;
  size_t m_BufferLimit;
+ size_t m_xformBufSize;
 
  BYTE *m_inBuf;         /* incoming stream */
  BYTE *m_decodeBuf;     /* decoded individual frames */
  BYTE *m_webcamBuf;     /* optional, scale incoming stream for the webcam */
  BYTE *m_xformBuf;      /* output of tjTransform (flip/rotate) */
- unsigned long m_xformBufSize;
 
  struct SwsContext *swc;
  tjhandle tj;
@@ -488,8 +488,6 @@ void process_frame(JPGFrame *frame) {
 
     int width = jpg_decoder.d_width, height = jpg_decoder.d_height;
     if (jpg_decoder.transform.op) {
-        // Transform into a separate preallocated buffer: transforming in place
-        // into the (non tjAlloc'd) input buffer lets libturbojpeg free() it.
         unsigned long xlen = jpg_decoder.m_xformBufSize;
         if (tjTransform(jpg_decoder.tjXform, p, len, 1, &jpg_decoder.m_xformBuf, &xlen,
                 &jpg_decoder.transform, TJFLAG_NOREALLOC)) {
